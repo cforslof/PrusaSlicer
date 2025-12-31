@@ -68,6 +68,35 @@ SET PS_DEPS_PATH_FILE_NAME=.DEPS_PATH.txt
 SET PS_DEPS_PATH_FILE=%~dp0deps\build\%PS_DEPS_PATH_FILE_NAME%
 SET PS_CONFIG_LIST="Debug;MinSizeRel;Release;RelWithDebInfo"
 
+REM ----------------------------------------------------------------------
+REM Optional overrides (leave unset to preserve original behavior)
+REM   PS_CMAKE_EXE : cmake executable to use (cmake.exe | cmake3 | full path)
+REM   PS_MAX_JOBS  : cap parallelism for msbuild (/m:N), cmake, and cl (/MP)
+REM ----------------------------------------------------------------------
+IF NOT DEFINED PS_CMAKE_EXE SET "PS_CMAKE_EXE=cmake.exe"
+SET "PS_MSBUILD_M=/m"
+IF DEFINED PS_MAX_JOBS (
+    SET "PS_MSBUILD_M=/m:%PS_MAX_JOBS%"
+    SET "CMAKE_BUILD_PARALLEL_LEVEL=%PS_MAX_JOBS%"
+    SET "CL_MPCount=%PS_MAX_JOBS%"
+)
+
+REM ----------------------------------------------------------------------
+REM Additional wrapper-controlled overrides (leave unset to preserve upstream defaults)
+REM   PS_APP_BUILD_DIR      : app build directory (default "build")
+REM   PS_SLIC3R_BUILD_TESTS : ON|OFF passed to CMake (-DSLIC3R_BUILD_TESTS=...) (default ON)
+REM   PS_APP_BUILD_TARGET   : target to build for the app step (default ALL_BUILD)
+REM                           Use "PrusaSlicer_app_gui" to build the GUI app only (skips tests).
+REM   PS_MSBUILD_VERBOSITY  : msbuild verbosity (quiet|minimal|normal|detailed|diag) (default quiet)
+REM   PS_MSBUILD_BINLOG     : optional msbuild binlog path (.binlog). Leave unset to disable.
+REM ----------------------------------------------------------------------
+IF NOT DEFINED PS_APP_BUILD_DIR SET "PS_APP_BUILD_DIR=build"
+IF NOT DEFINED PS_SLIC3R_BUILD_TESTS SET "PS_SLIC3R_BUILD_TESTS=ON"
+IF NOT DEFINED PS_APP_BUILD_TARGET SET "PS_APP_BUILD_TARGET=ALL_BUILD"
+IF NOT DEFINED PS_MSBUILD_VERBOSITY SET "PS_MSBUILD_VERBOSITY=quiet"
+SET "PS_MSBUILD_BINLOG_OPT="
+IF DEFINED PS_MSBUILD_BINLOG SET PS_MSBUILD_BINLOG_OPT=/bl:"%PS_MSBUILD_BINLOG%"
+
 REM Update this script for new versions by setting PS_VERSION_SUPPORTED to a
 REM new minimum version and setting PS_VERSION_EXCEEDED to the maximum supported
 REM version plus one.
@@ -215,12 +244,12 @@ IF "%PS_STEPS_DIRTY%" EQU "" (
     CALL :MAKE_OR_CLEAN_DIRECTORY "%PS_DESTDIR%"
 )
 cd deps\build || GOTO :END
-cmake.exe .. -DDESTDIR="%PS_DESTDIR%"
+"%PS_CMAKE_EXE%" .. -DDESTDIR="%PS_DESTDIR%"
 IF %ERRORLEVEL% NEQ 0 IF "%PS_STEPS_DIRTY%" NEQ "" (
-    (del CMakeCache.txt && cmake.exe .. -DDESTDIR="%PS_DESTDIR%") || GOTO :END
+    (del CMakeCache.txt && "%PS_CMAKE_EXE%" .. -DDESTDIR="%PS_DESTDIR%") || GOTO :END
 ) ELSE GOTO :END
 (echo %PS_DESTDIR%)> "%PS_DEPS_PATH_FILE%"
-msbuild /m ALL_BUILD.vcxproj /p:Configuration=%PS_CONFIG% /v:quiet %PS_PRIORITY% || GOTO :END
+msbuild %PS_MSBUILD_M% ALL_BUILD.vcxproj /p:Configuration=%PS_CONFIG% /v:%PS_MSBUILD_VERBOSITY% %PS_MSBUILD_BINLOG_OPT% %PS_PRIORITY% || GOTO :END
 cd ..\..
 IF /I "%PS_STEPS:~0,4%" EQU "deps" GOTO :RUN_APP
 
@@ -228,8 +257,8 @@ REM Build app
 :BUILD_APP
 SET EXIT_STATUS=4
 SET PS_CURRENT_STEP=app
-IF "%PS_STEPS_DIRTY%" EQU "" CALL :MAKE_OR_CLEAN_DIRECTORY build "%PS_CUSTOM_RUN_FILE%" .vs
-cd build || GOTO :END
+IF "%PS_STEPS_DIRTY%" EQU "" CALL :MAKE_OR_CLEAN_DIRECTORY "%PS_APP_BUILD_DIR%" "%PS_CUSTOM_RUN_FILE%" .vs
+cd "%PS_APP_BUILD_DIR%" || GOTO :END
 REM Make sure we have a custom batch file skeleton for the run stage
 set PS_CUSTOM_BAT=%PS_CUSTOM_RUN_FILE%
 CALL :CANONICALIZE_PATH PS_CUSTOM_BAT
@@ -238,12 +267,19 @@ SET PS_PROJECT_IS_OPEN=
 FOR /F "tokens=2 delims=," %%I in (
     'tasklist /V /FI "IMAGENAME eq devenv.exe " /NH /FO CSV ^| find "%PS_SOLUTION_NAME%"'
 ) do SET PS_PROJECT_IS_OPEN=%%~I
-cmake.exe .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG_LIST%
+"%PS_CMAKE_EXE%" .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DSLIC3R_BUILD_TESTS=%PS_SLIC3R_BUILD_TESTS% -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG_LIST%
 IF %ERRORLEVEL% NEQ 0 IF "%PS_STEPS_DIRTY%" NEQ "" (
-    (del CMakeCache.txt && cmake.exe .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG_LIST%) || GOTO :END
+    (del CMakeCache.txt && "%PS_CMAKE_EXE%" .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DSLIC3R_BUILD_TESTS=%PS_SLIC3R_BUILD_TESTS% -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG_LIST%) || GOTO :END
 ) ELSE GOTO :END
 REM Skip the build step if we're using the undocumented app-cmake to regenerate the full config from inside devenv
-IF "%PS_STEPS%" NEQ "app-cmake" msbuild /m ALL_BUILD.vcxproj /p:Configuration=%PS_CONFIG% /v:quiet %PS_PRIORITY% || GOTO :END
+REM Skip the build step if we're using the undocumented app-cmake to regenerate the full config from inside devenv
+IF "%PS_STEPS%" NEQ "app-cmake" (
+    IF /I "%PS_APP_BUILD_TARGET%" EQU "ALL_BUILD" (
+        msbuild %PS_MSBUILD_M% ALL_BUILD.vcxproj /p:Configuration=%PS_CONFIG% /v:%PS_MSBUILD_VERBOSITY% %PS_MSBUILD_BINLOG_OPT% %PS_PRIORITY% || GOTO :END
+    ) ELSE (
+        "%PS_CMAKE_EXE%" --build . --config %PS_CONFIG% --target %PS_APP_BUILD_TARGET% -- %PS_MSBUILD_M% /v:%PS_MSBUILD_VERBOSITY% %PS_MSBUILD_BINLOG_OPT% %PS_PRIORITY% || GOTO :END
+    )
+)
 (echo %PS_DESTDIR%)> "%PS_DEPS_PATH_FILE_FOR_CONFIG%"
 
 REM Run app
@@ -284,12 +320,12 @@ IF "%PS_RUN%" EQU "console" (
         @ECHO Preparing to run Visual Studio...
         cd ..\.. || GOTO :END
         REM This hack generates a single config for MSVS, guaranteeing it gets set as the active config.
-        cmake.exe .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG% > nul 2> nul || GOTO :END
+        "%PS_CMAKE_EXE%" .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DSLIC3R_BUILD_TESTS=%PS_SLIC3R_BUILD_TESTS% -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG% > nul 2> nul || GOTO :END
         REM Now launch devenv with the single config (setting it active) and a /command switch to re-run cmake and generate the full config list
         start devenv.exe %PS_SOLUTION_NAME%.sln /command ^"shell /o ^^^"%~f0^^^" -d ^^^"%PS_DESTDIR%^^^" -c %PS_CONFIG% -a %PS_ARCH% -r none -s app-cmake^"
         REM If devenv fails to launch just directly regenerate the full config list.
         IF %ERRORLEVEL% NEQ 0 (
-            cmake.exe .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG_LIST% 2> nul 1> nul || GOTO :END
+            "%PS_CMAKE_EXE%" .. -DCMAKE_PREFIX_PATH="%PS_DESTDIR%\usr\local" -DSLIC3R_BUILD_TESTS=%PS_SLIC3R_BUILD_TESTS% -DCMAKE_CONFIGURATION_TYPES=%PS_CONFIG_LIST% 2> nul 1> nul || GOTO :END
         )
     )
 )
