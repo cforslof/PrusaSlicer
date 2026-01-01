@@ -721,6 +721,16 @@ void GCodeGenerator::do_export(Print* print, const char* path, GCodeProcessorRes
     print->set_done(psGCodeExport);
 }
 
+namespace {
+double effective_volumetric_speed(const FullPrintConfig &config, int extruder_id);
+bool is_auto_speed(const ConfigOptionFloatOrPercent &speed, const FullPrintConfig &config, int extruder_id);
+double resolve_percent_speed(
+    const ConfigOptionFloatOrPercent &speed,
+    const FullPrintConfig &config,
+    int extruder_id,
+    const ExtrusionAttributes &path_attr);
+} // namespace
+
 // free functions called by GCodeGenerator::_do_export()
 namespace DoExport {
     static void init_gcode_processor(const PrintConfig& config, GCodeProcessor& processor, bool& silent_time_estimator_enabled)
@@ -737,6 +747,7 @@ namespace DoExport {
 	{
 	    // get the minimum cross-section used in the print
 	    std::vector<double> mm3_per_mm;
+	    const FullPrintConfig &full_config = print.full_print_config();
 	    for (auto object : print.objects()) {
 	        for (size_t region_id = 0; region_id < object->num_printing_regions(); ++ region_id) {
 	            const PrintRegion &region = object->printing_region(region_id);
@@ -744,12 +755,11 @@ namespace DoExport {
 	                const LayerRegion* layerm = layer->regions()[region_id];
                     const int perimeter_extruder = region.config().perimeter_extruder > 0 ? region.config().perimeter_extruder - 1 : 0;
                     const int infill_extruder    = region.config().infill_extruder > 0 ? region.config().infill_extruder - 1 : 0;
-                    const int solid_extruder     = region.config().solid_infill_extruder > 0 ? region.config().solid_infill_extruder - 1 : infill_extruder;
 
-                    const bool perimeter_auto = is_auto_speed(region.config().perimeter_speed, print.config(), perimeter_extruder);
+                    const bool perimeter_auto = is_auto_speed(region.config().perimeter_speed, full_config, perimeter_extruder);
                     const bool external_auto  = region.config().external_perimeter_speed.value == 0. || perimeter_auto;
                     const bool small_auto     = region.config().small_perimeter_speed.value == 0. || perimeter_auto;
-                    const bool infill_auto    = is_auto_speed(region.config().infill_speed, print.config(), infill_extruder);
+                    const bool infill_auto    = is_auto_speed(region.config().infill_speed, full_config, infill_extruder);
                     const bool solid_auto     = region.config().solid_infill_speed.value == 0. || infill_auto;
                     const bool top_solid_auto = region.config().top_solid_infill_speed.value == 0. || solid_auto;
                     const bool over_bridge_auto = region.config().over_bridge_speed.value == 0. || solid_auto;

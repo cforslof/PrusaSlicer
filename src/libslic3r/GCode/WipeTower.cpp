@@ -577,7 +577,7 @@ WipeTower::WipeTower(const Vec2f& pos, double rotation_deg, const PrintConfig& c
             effective_mvs = filament_limit;
         if (effective_mvs <= 0.)
             return 0.f;
-        const double layer_height = config.layer_height.value;
+        const double layer_height = config.first_layer_height.value;
         const double nozzle_diameter = config.nozzle_diameter.get_at(initial_tool);
         const double line_width = nozzle_diameter * Width_To_Nozzle_Ratio;
         const double mm3_per_mm = layer_height * (line_width - layer_height * (1. - M_PI / 4.));
