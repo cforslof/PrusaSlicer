@@ -736,7 +736,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionFloatOrPercent,       infill_extrusion_width))
     ((ConfigOptionInt,                  infill_every_layers))
     ((ConfigOptionFloatOrPercent,       infill_overlap))
-    ((ConfigOptionFloat,                infill_speed))
+    ((ConfigOptionFloatOrPercent,       infill_speed))
     // Ironing options
     ((ConfigOptionBool,                 ironing))
     ((ConfigOptionEnum<IroningType>,    ironing_type))
@@ -747,7 +747,7 @@ PRINT_CONFIG_CLASS_DEFINE(
     ((ConfigOptionBool,                 overhangs))
     ((ConfigOptionInt,                  perimeter_extruder))
     ((ConfigOptionFloatOrPercent,       perimeter_extrusion_width))
-    ((ConfigOptionFloat,                perimeter_speed))
+    ((ConfigOptionFloatOrPercent,       perimeter_speed))
     // Total number of perimeters.
     ((ConfigOptionInt,                  perimeters))
     ((ConfigOptionFloatOrPercent,       small_perimeter_speed))

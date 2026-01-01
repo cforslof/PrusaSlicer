@@ -560,6 +560,52 @@ namespace DoExport {
     }
 } // namespace DoExport
 
+namespace {
+double effective_volumetric_speed(const FullPrintConfig &config, int extruder_id)
+{
+    const double print_limit{config.max_volumetric_speed.value};
+    const double filament_limit{config.filament_max_volumetric_speed.get_at(extruder_id)};
+    if (print_limit > 0. && filament_limit > 0.)
+        return std::min(print_limit, filament_limit);
+    if (print_limit > 0.)
+        return print_limit;
+    if (filament_limit > 0.)
+        return filament_limit;
+    return 0.;
+}
+
+bool is_auto_speed(const ConfigOptionFloatOrPercent &speed, const FullPrintConfig &config, int extruder_id)
+{
+    if (speed.value == 0.)
+        return true;
+    if (!speed.percent)
+        return false;
+    // Percent speeds depend on a volumetric cap. If none is available, treat as auto.
+    return effective_volumetric_speed(config, extruder_id) <= 0.;
+}
+
+double resolve_percent_speed(
+    const ConfigOptionFloatOrPercent &speed,
+    const FullPrintConfig &config,
+    int extruder_id,
+    const ExtrusionAttributes &path_attr)
+{
+    if (!speed.percent)
+        return speed.value;
+    if (speed.value == 0.)
+        return 0.;
+    const double effective_mvs{effective_volumetric_speed(config, extruder_id)};
+    if (effective_mvs <= 0.)
+        return 0.;
+    double mm3_per_mm = path_attr.mm3_per_mm;
+    if (mm3_per_mm <= 0. && path_attr.width > 0. && path_attr.height > 0.)
+        mm3_per_mm = path_attr.width * path_attr.height;
+    if (mm3_per_mm <= 0.)
+        return 0.;
+    return (effective_mvs / mm3_per_mm) * (speed.value / 100.);
+}
+} // namespace
+
 GCodeGenerator::GCodeGenerator(const Print* print) :
     m_origin(Vec2d::Zero()),
     m_enable_loop_clipping(true), 
@@ -696,16 +742,28 @@ namespace DoExport {
 	            const PrintRegion &region = object->printing_region(region_id);
 	            for (auto layer : object->layers()) {
 	                const LayerRegion* layerm = layer->regions()[region_id];
-	                if (region.config().get_abs_value("perimeter_speed") == 0 ||
-	                    region.config().get_abs_value("small_perimeter_speed") == 0 ||
-	                    region.config().get_abs_value("external_perimeter_speed") == 0 ||
+                    const int perimeter_extruder = region.config().perimeter_extruder > 0 ? region.config().perimeter_extruder - 1 : 0;
+                    const int infill_extruder    = region.config().infill_extruder > 0 ? region.config().infill_extruder - 1 : 0;
+                    const int solid_extruder     = region.config().solid_infill_extruder > 0 ? region.config().solid_infill_extruder - 1 : infill_extruder;
+
+                    const bool perimeter_auto = is_auto_speed(region.config().perimeter_speed, print.config(), perimeter_extruder);
+                    const bool external_auto  = region.config().external_perimeter_speed.value == 0. || perimeter_auto;
+                    const bool small_auto     = region.config().small_perimeter_speed.value == 0. || perimeter_auto;
+                    const bool infill_auto    = is_auto_speed(region.config().infill_speed, print.config(), infill_extruder);
+                    const bool solid_auto     = region.config().solid_infill_speed.value == 0. || infill_auto;
+                    const bool top_solid_auto = region.config().top_solid_infill_speed.value == 0. || solid_auto;
+                    const bool over_bridge_auto = region.config().over_bridge_speed.value == 0. || solid_auto;
+
+	                if (perimeter_auto ||
+	                    small_auto ||
+	                    external_auto ||
 	                    region.config().get_abs_value("bridge_speed") == 0)
 	                    mm3_per_mm.push_back(layerm->perimeters().min_mm3_per_mm());
-	                if (region.config().get_abs_value("infill_speed") == 0 ||
-	                    region.config().get_abs_value("solid_infill_speed") == 0 ||
-	                    region.config().get_abs_value("top_solid_infill_speed") == 0 ||
+	                if (infill_auto ||
+	                    solid_auto ||
+	                    top_solid_auto ||
                         region.config().get_abs_value("bridge_speed") == 0 ||
-                        region.config().get_abs_value("over_bridge_speed") == 0)
+                        over_bridge_auto)
                     {
                         // Minimal volumetric flow should not be calculated over ironing extrusions.
                         // Use following lambda instead of the built-it method.
@@ -3167,8 +3225,12 @@ std::string GCodeGenerator::extrude_perimeters(
     for (const GCode::ExtrusionOrder::Perimeter &perimeter : perimeters) {
         double speed{-1};
         // Apply the small perimeter speed.
-        if (perimeter.extrusion_entity->length() <= SMALL_PERIMETER_LENGTH)
-            speed = m_config.small_perimeter_speed.get_abs_value(m_config.perimeter_speed);
+        if (perimeter.extrusion_entity->length() <= SMALL_PERIMETER_LENGTH && !perimeter.smooth_path.empty()) {
+            const auto &path_attr = perimeter.smooth_path.front().path_attributes;
+            const int   extruder_id = m_writer.extruder()->id();
+            const double perimeter_speed = resolve_percent_speed(m_config.perimeter_speed, m_config, extruder_id, path_attr);
+            speed = m_config.small_perimeter_speed.get_abs_value(perimeter_speed);
+        }
         gcode += this->extrude_smooth_path(perimeter.smooth_path, perimeter.extrusion_entity->is_loop(), comment_perimeter, speed, perimeter.wipe_offset);
         this->m_travel_obstacle_tracker.mark_extruded(
             perimeter.extrusion_entity, print_instance.object_layer_to_print_id, print_instance.instance_id
@@ -3430,21 +3492,27 @@ std::string GCodeGenerator::_extrude(
         // gcfNoExtrusion
         e_per_mm = 0;
 
+    const int extruder_id = m_writer.extruder()->id();
+    const double perimeter_speed = resolve_percent_speed(m_config.perimeter_speed, m_config, extruder_id, path_attr);
+    const double external_perimeter_speed = m_config.external_perimeter_speed.get_abs_value(perimeter_speed);
+    const double infill_speed = resolve_percent_speed(m_config.infill_speed, m_config, extruder_id, path_attr);
+    const double solid_infill_speed = m_config.solid_infill_speed.get_abs_value(infill_speed);
+    const double top_solid_infill_speed = m_config.top_solid_infill_speed.get_abs_value(solid_infill_speed);
+
     // set speed
     if (speed == -1) {
         if (path_attr.role == ExtrusionRole::Perimeter) {
-            speed = m_config.get_abs_value("perimeter_speed");
+            speed = perimeter_speed;
         } else if (path_attr.role == ExtrusionRole::ExternalPerimeter) {
-            speed = m_config.get_abs_value("external_perimeter_speed");
+            speed = external_perimeter_speed;
         } else if (path_attr.role.is_bridge()) {
             assert(path_attr.role.is_perimeter() || path_attr.role == ExtrusionRole::BridgeInfill);
             speed = m_config.get_abs_value("bridge_speed");
         } else if (path_attr.role == ExtrusionRole::InternalInfill) {
-            speed = m_config.get_abs_value("infill_speed");
+            speed = infill_speed;
         } else if (path_attr.role == ExtrusionRole::SolidInfill) {
-            speed = m_config.get_abs_value("solid_infill_speed");
+            speed = solid_infill_speed;
         } else if (path_attr.role == ExtrusionRole::InfillOverBridge) {
-            const double solid_infill_speed = m_config.get_abs_value("solid_infill_speed");
             const double over_bridge_speed{m_config.get_abs_value("over_bridge_speed", solid_infill_speed)};
             if (over_bridge_speed > 0) {
                 speed = over_bridge_speed;
@@ -3452,7 +3520,7 @@ std::string GCodeGenerator::_extrude(
                 speed = solid_infill_speed;
             }
         } else if (path_attr.role == ExtrusionRole::TopSolidInfill) {
-            speed = m_config.get_abs_value("top_solid_infill_speed");
+            speed = top_solid_infill_speed;
         } else if (path_attr.role == ExtrusionRole::Ironing) {
             speed = m_config.get_abs_value("ironing_speed");
         } else if (path_attr.role == ExtrusionRole::GapFill) {
@@ -3476,7 +3544,7 @@ std::string GCodeGenerator::_extrude(
 
     ExtrusionProcessor::OverhangSpeeds dynamic_print_and_fan_speeds = {-1.f, -1.f};
     if (path_attr.overhang_attributes.has_value()) {
-        double external_perimeter_reference_speed = m_config.get_abs_value("external_perimeter_speed");
+        double external_perimeter_reference_speed = external_perimeter_speed;
         if (external_perimeter_reference_speed == 0) {
             external_perimeter_reference_speed = m_volumetric_speed / path_attr.mm3_per_mm;
         }

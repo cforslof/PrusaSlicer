@@ -4,6 +4,7 @@
 ///|/ PrusaSlicer is released under the terms of the AGPLv3 or higher
 ///|/
 #include <cassert>
+#include <functional>
 
 #include "libslic3r/Flow.hpp"
 #include "libslic3r/Slicing.hpp"
@@ -103,17 +104,19 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
     double support_material_interface_speed = print_config.get_abs_value("support_material_interface_speed", support_material_speed);
     double bridge_speed                     = print_config.opt_float("bridge_speed");
     double bridge_flow_ratio                = print_config.opt_float("bridge_flow_ratio");
-    double perimeter_speed                  = print_config.opt_float("perimeter_speed");
-    double external_perimeter_speed         = print_config.get_abs_value("external_perimeter_speed", perimeter_speed);
     // double gap_fill_speed                   = print_config.opt_bool("gap_fill_enabled") ? print_config.opt_float("gap_fill_speed") : 0.;
-    double infill_speed                     = print_config.opt_float("infill_speed");
-    double small_perimeter_speed            = print_config.get_abs_value("small_perimeter_speed", perimeter_speed);
-    double solid_infill_speed               = print_config.get_abs_value("solid_infill_speed", infill_speed);
-    double top_solid_infill_speed           = print_config.get_abs_value("top_solid_infill_speed", solid_infill_speed);
     // Maximum print speed when auto-speed is enabled by setting any of the above speed values to zero.
     double max_print_speed                  = print_config.opt_float("max_print_speed");
     // Maximum volumetric speed allowed for the print profile.
     double max_volumetric_speed             = print_config.opt_float("max_volumetric_speed");
+    double filament_max_volumetric_speed    = idx_extruder >= 0 ? filament_config.opt_float("filament_max_volumetric_speed", idx_extruder) : 0.0;
+    double effective_mvs                    = 0.;
+    if (max_volumetric_speed > 0. && filament_max_volumetric_speed > 0.)
+        effective_mvs = std::min(max_volumetric_speed, filament_max_volumetric_speed);
+    else if (max_volumetric_speed > 0.)
+        effective_mvs = max_volumetric_speed;
+    else if (filament_max_volumetric_speed > 0.)
+        effective_mvs = filament_max_volumetric_speed;
 
     const auto &extrusion_width                     = *print_config.option<ConfigOptionFloatOrPercent>("extrusion_width");
     const auto &external_perimeter_extrusion_width  = *print_config.option<ConfigOptionFloatOrPercent>("external_perimeter_extrusion_width");
@@ -124,6 +127,12 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
     const auto &support_material_extrusion_width    = *print_config.option<ConfigOptionFloatOrPercent>("support_material_extrusion_width");
     const auto &top_infill_extrusion_width          = *print_config.option<ConfigOptionFloatOrPercent>("top_infill_extrusion_width");
     const auto &first_layer_speed                   = *print_config.option<ConfigOptionFloatOrPercent>("first_layer_speed");
+    const auto &perimeter_speed                     = *print_config.option<ConfigOptionFloatOrPercent>("perimeter_speed");
+    const auto &external_perimeter_speed            = *print_config.option<ConfigOptionFloatOrPercent>("external_perimeter_speed");
+    const auto &small_perimeter_speed               = *print_config.option<ConfigOptionFloatOrPercent>("small_perimeter_speed");
+    const auto &infill_speed                        = *print_config.option<ConfigOptionFloatOrPercent>("infill_speed");
+    const auto &solid_infill_speed                  = *print_config.option<ConfigOptionFloatOrPercent>("solid_infill_speed");
+    const auto &top_solid_infill_speed              = *print_config.option<ConfigOptionFloatOrPercent>("top_solid_infill_speed");
 
     // Index of an extruder assigned to a feature. If set to 0, an active extruder will be used for a multi-material print.
     // If different from idx_extruder, it will not be taken into account for this hint.
@@ -159,12 +168,24 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
                 speed_normal = first_layer_speed.get_abs_value(speed_normal);
             return (speed_normal > 0.) ? speed_normal : speed_max;
         };
+        auto resolve_percent_speed =
+            [effective_mvs](const ConfigOptionFloatOrPercent &speed, const Flow &flow) {
+            if (!speed.percent)
+                return speed.value;
+            if (speed.value == 0. || effective_mvs <= 0.)
+                return 0.;
+            const double mm3_per_mm = flow.mm3_per_mm();
+            if (mm3_per_mm <= 0.)
+                return 0.;
+            return (effective_mvs / mm3_per_mm) * (speed.value / 100.);
+        };
         auto test_flow =
-            [first_layer_extrusion_width_ptr, extrusion_width, nozzle_diameter, lh, bridging, bridge_speed, bridge_flow_ratio, limit_by_first_layer_speed, max_print_speed, &max_flow, &max_flow_extrusion_type]
-            (FlowRole flow_role, const ConfigOptionFloatOrPercent &this_extrusion_width, double speed, const char *err_msg) {
+            [first_layer_extrusion_width_ptr, extrusion_width, nozzle_diameter, lh, bridging, bridge_speed, bridge_flow_ratio, limit_by_first_layer_speed, max_print_speed, &max_flow, &max_flow_extrusion_type, resolve_percent_speed]
+            (FlowRole flow_role, const ConfigOptionFloatOrPercent &this_extrusion_width, const std::function<double(const Flow&)> &speed_for_flow, const char *err_msg) {
             Flow flow = bridging ?
                 Flow::new_from_config_width(flow_role, first_positive(first_layer_extrusion_width_ptr, this_extrusion_width, extrusion_width), nozzle_diameter, lh) :
                 Flow::bridging_flow(nozzle_diameter * bridge_flow_ratio, nozzle_diameter);
+            const double speed = speed_for_flow(flow);
             double volumetric_flow = flow.mm3_per_mm() * (bridging ? bridge_speed : limit_by_first_layer_speed(speed, max_print_speed));
             if (max_flow < volumetric_flow) {
                 max_flow = volumetric_flow;
@@ -172,20 +193,49 @@ std::string PresetHints::maximum_volumetric_flow_description(const PresetBundle 
             }
         };
         if (perimeter_extruder_active) {
-            test_flow(frExternalPerimeter, external_perimeter_extrusion_width, std::max(external_perimeter_speed, small_perimeter_speed), L("external perimeters"));
-            test_flow(frPerimeter,         perimeter_extrusion_width,          std::max(perimeter_speed,          small_perimeter_speed), L("perimeters"));
+            test_flow(frExternalPerimeter, external_perimeter_extrusion_width,
+                [&resolve_percent_speed, &perimeter_speed, &external_perimeter_speed, &small_perimeter_speed](const Flow &flow) {
+                    const double base_speed = resolve_percent_speed(perimeter_speed, flow);
+                    return std::max(external_perimeter_speed.get_abs_value(base_speed), small_perimeter_speed.get_abs_value(base_speed));
+                },
+                L("external perimeters"));
+            test_flow(frPerimeter, perimeter_extrusion_width,
+                [&resolve_percent_speed, &perimeter_speed, &small_perimeter_speed](const Flow &flow) {
+                    const double base_speed = resolve_percent_speed(perimeter_speed, flow);
+                    return std::max(base_speed, small_perimeter_speed.get_abs_value(base_speed));
+                },
+                L("perimeters"));
         }
         if (! bridging && infill_extruder_active)
-            test_flow(frInfill, infill_extrusion_width, infill_speed, L("infill"));
+            test_flow(frInfill, infill_extrusion_width,
+                [&resolve_percent_speed, &infill_speed](const Flow &flow) {
+                    return resolve_percent_speed(infill_speed, flow);
+                },
+                L("infill"));
         if (solid_infill_extruder_active) {
-            test_flow(frInfill, solid_infill_extrusion_width, solid_infill_speed, L("solid infill"));
+            test_flow(frInfill, solid_infill_extrusion_width,
+                [&resolve_percent_speed, &infill_speed, &solid_infill_speed](const Flow &flow) {
+                    const double base_speed = resolve_percent_speed(infill_speed, flow);
+                    return solid_infill_speed.get_abs_value(base_speed);
+                },
+                L("solid infill"));
             if (! bridging)
-                test_flow(frInfill, top_infill_extrusion_width, top_solid_infill_speed, L("top solid infill"));
+                test_flow(frInfill, top_infill_extrusion_width,
+                    [&resolve_percent_speed, &infill_speed, &solid_infill_speed, &top_solid_infill_speed](const Flow &flow) {
+                        const double base_speed = resolve_percent_speed(infill_speed, flow);
+                        const double solid_speed = solid_infill_speed.get_abs_value(base_speed);
+                        return top_solid_infill_speed.get_abs_value(solid_speed);
+                    },
+                    L("top solid infill"));
         }
         if (! bridging && support_material_extruder_active)
-            test_flow(frSupportMaterial, support_material_extrusion_width, support_material_speed, L("support"));
+            test_flow(frSupportMaterial, support_material_extrusion_width,
+                [support_material_speed](const Flow &) { return support_material_speed; },
+                L("support"));
         if (support_material_interface_extruder_active)
-            test_flow(frSupportMaterialInterface, support_material_extrusion_width, support_material_interface_speed, L("support interface"));
+            test_flow(frSupportMaterialInterface, support_material_extrusion_width,
+                [support_material_interface_speed](const Flow &) { return support_material_interface_speed; },
+                L("support interface"));
         //FIXME handle gap_fill_speed
         if (! out.empty())
             out += "\n";

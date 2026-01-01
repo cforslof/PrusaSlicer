@@ -1977,15 +1977,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comExpert;
     def->set_default_value(new ConfigOptionFloatOrPercent(25, true));
 
-    def = this->add("infill_speed", coFloat);
+    def = this->add("infill_speed", coFloatOrPercent);
     def->label = L("Infill");
     def->category = L("Speed");
-    def->tooltip = L("Speed for printing the internal fill. Set to zero for auto.");
-    def->sidetext = L("mm/s");
+    def->tooltip = L("Speed for printing the internal fill. Set to zero for auto. If expressed as a percentage "
+                     "(for example: 80%) it is calculated over the effective volumetric speed limit "
+                     "(print and filament max volumetric speed).");
+    def->sidetext = L("mm/s or %");
     def->aliases = { "print_feed_rate", "infill_feed_rate" };
     def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(80));
+    def->set_default_value(new ConfigOptionFloatOrPercent(80, false));
 
     def = this->add("inherits", coString);
     def->label = L("Inherits profile");
@@ -2554,15 +2556,17 @@ void PrintConfigDef::init_fff_params()
     def->mode = comAdvanced;
     def->set_default_value(new ConfigOptionFloatOrPercent(0, false));
 
-    def = this->add("perimeter_speed", coFloat);
+    def = this->add("perimeter_speed", coFloatOrPercent);
     def->label = L("Perimeters");
     def->category = L("Speed");
-    def->tooltip = L("Speed for perimeters (contours, aka vertical shells). Set to zero for auto.");
-    def->sidetext = L("mm/s");
+    def->tooltip = L("Speed for perimeters (contours, aka vertical shells). Set to zero for auto. "
+                     "If expressed as a percentage (for example: 80%) it is calculated over the effective "
+                     "volumetric speed limit (print and filament max volumetric speed).");
+    def->sidetext = L("mm/s or %");
     def->aliases = { "perimeter_feed_rate" };
     def->min = 0;
     def->mode = comAdvanced;
-    def->set_default_value(new ConfigOptionFloat(60));
+    def->set_default_value(new ConfigOptionFloatOrPercent(60, false));
 
     def = this->add("perimeters", coInt);
     def->label = L("Perimeters");
