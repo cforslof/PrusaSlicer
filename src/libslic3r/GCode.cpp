@@ -747,7 +747,8 @@ namespace DoExport {
 	{
 	    // get the minimum cross-section used in the print
 	    std::vector<double> mm3_per_mm;
-	    const FullPrintConfig &full_config = print.full_print_config();
+	    FullPrintConfig full_config;
+	    full_config.apply(print.full_print_config(), true);
 	    for (auto object : print.objects()) {
 	        for (size_t region_id = 0; region_id < object->num_printing_regions(); ++ region_id) {
 	            const PrintRegion &region = object->printing_region(region_id);
