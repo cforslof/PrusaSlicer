@@ -556,11 +556,39 @@ WipeTower::WipeTower(const Vec2f& pos, double rotation_deg, const PrintConfig& c
     m_no_sparse_layers(config.wipe_tower_no_sparse_layers),
     m_gcode_flavor(config.gcode_flavor),
     m_travel_speed(config.travel_speed),
-    m_infill_speed(default_region_config.infill_speed),
-    m_perimeter_speed(default_region_config.perimeter_speed),
+    m_infill_speed(0.f),
+    m_perimeter_speed(0.f),
     m_current_tool(initial_tool),
     wipe_volumes(wiping_matrix)
 {
+    auto resolve_wipe_tower_speed = [&](const ConfigOptionFloatOrPercent &speed) {
+        if (!speed.percent)
+            return float(speed.value);
+        if (speed.value == 0.)
+            return 0.f;
+        const double print_limit{config.max_volumetric_speed.value};
+        const double filament_limit{config.filament_max_volumetric_speed.get_at(initial_tool)};
+        double effective_mvs = 0.;
+        if (print_limit > 0. && filament_limit > 0.)
+            effective_mvs = std::min(print_limit, filament_limit);
+        else if (print_limit > 0.)
+            effective_mvs = print_limit;
+        else if (filament_limit > 0.)
+            effective_mvs = filament_limit;
+        if (effective_mvs <= 0.)
+            return 0.f;
+        const double layer_height = config.first_layer_height.value;
+        const double nozzle_diameter = config.nozzle_diameter.get_at(initial_tool);
+        const double line_width = nozzle_diameter * Width_To_Nozzle_Ratio;
+        const double mm3_per_mm = layer_height * (line_width - layer_height * (1. - M_PI / 4.));
+        if (mm3_per_mm <= 0.)
+            return 0.f;
+        return float((effective_mvs / mm3_per_mm) * (speed.value / 100.));
+    };
+
+    m_infill_speed = resolve_wipe_tower_speed(default_region_config.infill_speed);
+    m_perimeter_speed = resolve_wipe_tower_speed(default_region_config.perimeter_speed);
+
     // Read absolute value of first layer speed, if given as percentage,
     // it is taken over following default. Speeds from config are not
     // easily accessible here.
